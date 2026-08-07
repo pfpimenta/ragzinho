@@ -47,7 +47,7 @@ class Agent:
             model="deepseek-v4-flash",
             temperature=0,
         )
-        self.s = TavilyClient(api_key=os.environ["TAVILY_API_KEY"])
+        self.tavily_client = TavilyClient(api_key=os.environ["TAVILY_API_KEY"])
         self.state_graph = self._build_agent_state_graph()
 
     def _build_agent_state_graph(self) -> StateGraph[AgentState]:
@@ -72,19 +72,28 @@ class Agent:
 
     def _search_node(self, state: AgentState) -> dict:
         print("DEBUG search node, revision_number:", state["revision_number"])
-        return {
-            "retrieval_content": "TODO retrieval content ... revision {state['revision_number']}"
-        }
-        # TODO
-        # TODO create a better search query based on the task, the draft, and the critique
-        queries = self.model.with_structured_output(Queries).invoke(
-            [SystemMessage(content=SEARCH_PROMPT), HumanMessage(content=state["task"])]
+        SEARCH_PROMPT = (
+            "You are a researcher charged with providing information that can "
+            "be used whefor writing an answer to the given task below. "
+            "Generate a list of search queries that will gather any relevant information. "
+            "Generate a JSON object with a 'queries' list containing up to 3 search queries.\n"
+            'Example output: {"queries": ["query 1", "query 2"]}'
+            "\nzThe task: "
         )
-        content = state["content"] or []
-        for q in queries.queries:
-            response = self.tavily.search(query=q, max_results=2)
+
+        # queries = self.model.with_structured_output(Queries).invoke(
+        queries = self.model.with_structured_output(method="json_mode").invoke(
+            [SystemMessage(content=SEARCH_PROMPT), HumanMessage(content=state["task"])]
+            # [HumanMessage(content=state["task"])]
+        )
+        retrieval_content = state.get("retrieval_content", [])
+        for q in queries["queries"]:
+            response = self.tavily_client.search(query=q, max_results=2)
             for r in response["results"]:
-                content.append(r["content"])
+                retrieval_content.append(r["content"])
+        return {
+            "retrieval_content": retrieval_content,
+        }
 
     def _writer_node(self, state: AgentState) -> dict:
         print("DEBUG writer node, revision_number:", state["revision_number"])
