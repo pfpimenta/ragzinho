@@ -11,7 +11,6 @@
 
 import warnings
 
-
 # Suppress all deprecation and user warnings globally
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -21,25 +20,40 @@ warnings.filterwarnings("ignore", message=".*LangChainDeprecationWarning.*")
 warnings.filterwarnings("ignore", message=".*LangChainPendingDeprecationWarning.*")
 warnings.filterwarnings("ignore", message=".*allowed_objects.*")
 
-import time
+import logging
 import os
+import time
+from typing import List, TypedDict
+
 from dotenv import load_dotenv
-from langgraph.graph import StateGraph, END
-from typing import TypedDict
-from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
-
 from langchain_community.tools.tavily_search import TavilySearchResults
-from tavily import TavilyClient
-
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_deepseek import ChatDeepSeek
-from typing import TypedDict, List
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.graph import END, StateGraph
+from llama_index.core import Document, Settings, SimpleDirectoryReader, VectorStoreIndex
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.llms.deepseek import DeepSeek
 
 # from langchain_core.pydantic_v1 import BaseModel # gives a warning
 from pydantic import BaseModel  # new version to avoid warning
-from langgraph.checkpoint.sqlite import SqliteSaver
-from llama_index.core import SimpleDirectoryReader, Document, VectorStoreIndex, Settings
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-from llama_index.llms.deepseek import DeepSeek
+from tavily import TavilyClient
+
+# ==================== LOGGING CONFIGURATION ====================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("AgentLogger")
+
+# Terminal Color Constants
+CYAN = "\033[96m"
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+MAGENTA = "\033[95m"
+RESET = "\033[0m"
+# ===============================================================
 
 # Load variables from .env file into os.environ
 load_dotenv()
@@ -98,24 +112,26 @@ class Agent:
 
     def _init_rag_engine(self, document_path: str):
         # TODO ... WIP
-        print("DEBUG: Setting up LlamaIndex...")
+        logger.debug("DEBUG: Setting up LlamaIndex...")
         # Configure LlamaIndex settings
         Settings.llm = DeepSeek(model="deepseek-v4-flash")
-        print("DEBUG: Setting up HuggingFaceEmbedding model...")
+        logger.debug("DEBUG: Setting up HuggingFaceEmbedding model...")
         Settings.embed_model = HuggingFaceEmbedding(
             model_name="BAAI/bge-small-en-v1.5", cache_folder=CACHE_DIR
         )
         # Load EPUB document & create RAG index
-        print("DEBUG: Loading EPUB documents...")
+        logger.debug("DEBUG: Loading EPUB documents...")
         documents = SimpleDirectoryReader(input_files=[EPUB_PATH]).load_data()
-        print(f"Loaded {len(documents)} documents.")
+        logger.info(f"Loaded {len(documents)} documents.")
         # Create a vector store index from the documents
         index = VectorStoreIndex.from_documents(documents)
-        print(f"created VectorStoreIndex: {index}")
+        logger.debug(f"created VectorStoreIndex: {index}")
         return index.as_query_engine()
 
     def _search_node(self, state: AgentState) -> dict:
-        print("DEBUG search node, revision_number:", state["revision_number"])
+        logger.info(
+            f"{CYAN}--- [SEARCH NODE] (Revision {state['revision_number']}) ---{RESET}"
+        )
         SEARCH_PROMPT = (
             "You are a researcher charged with providing information that can "
             "be used whefor writing an answer to the given task below. "
@@ -125,22 +141,36 @@ class Agent:
             "\nzThe task: "
         )
 
-        # queries = self.model.with_structured_output(Queries).invoke(
+        # use LLM to generate search queries
+        start_time = time.time()
         queries = self.model.with_structured_output(method="json_mode").invoke(
             [SystemMessage(content=SEARCH_PROMPT), HumanMessage(content=state["task"])]
             # [HumanMessage(content=state["task"])]
         )
+        llm_elapsed = time.time() - start_time
+        logger.info(
+            f"Query generation took {llm_elapsed:.2f}s | Generated {len(queries.get('queries', []))} queries"
+        )
+
         retrieval_content = state.get("retrieval_content", [])
+        start_time = time.time()
+
         for q in queries["queries"]:
             response = self.tavily_client.search(query=q, max_results=2)
             for r in response["results"]:
                 retrieval_content.append(r["content"])
+        elapsed = time.time() - start_time
+        logger.info(
+            f"Retrieved {len(retrieval_content)} total snippets in {elapsed:.2f}s"
+        )
         return {
             "retrieval_content": retrieval_content,
         }
 
     def _writer_node(self, state: AgentState) -> dict:
-        print("DEBUG writer node, revision_number:", state["revision_number"])
+        logger.info(
+            f"{GREEN}--- [WRITER NODE] (Revision {state['revision_number']}) ---{RESET}"
+        )
         WRITER_PROMPT = (
             "Write a draft response to the task, using the retrieved information. "
             "If you don't have enough information, write a draft based on your "
@@ -154,15 +184,19 @@ class Agent:
 
         start_time = time.time()
         response = self.model.invoke(messages)
-        end_time = time.time()
-        print(f"DEBUG deepseekl call time elapsed: {end_time - start_time:.2f} seconds")
+        elapsed = time.time() - start_time
+        logger.info(
+            f"Draft generated in {elapsed:.2f}s ({len(response.content)} chars)"
+        )
         return {
             "draft": response.content,
             "revision_number": state["revision_number"] + 1,
         }
 
     def _judge_node(self, state: AgentState) -> dict:
-        print("DEBUG judge node, revision_number:", state["revision_number"])
+        logger.info(
+            f"{YELLOW}--- [JUDGE NODE] (Revision {state['revision_number']}) ---{RESET}"
+        )
         JUDGE_PROMPT = (
             "You are a text critic, and your main goal is to judge if the draft is good. "
             "Finish your answer with either 'SEARCH_AGAIN', 'REWRITE' or 'ACCEPT'. "
@@ -182,13 +216,22 @@ class Agent:
             SystemMessage(content=JUDGE_PROMPT),
             HumanMessage(content=user_payload),
         ]
+        start_time = time.time()
         response = self.model.invoke(messages)
+        elapsed = time.time() - start_time
+        logger.info(f"Critique finished in {elapsed:.2f}s | Verdict: {response}")
         return {"critique": response.content}
 
     def _is_answer_text_done(self, state: AgentState):
         if state["revision_number"] > self.max_revisions:
+            logger.info(
+                f"{MAGENTA}Max revisions ({self.max_revisions}) reached. Terminating graph.{RESET}"
+            )
             return END
         elif "REWRITE" in state["critique"]:  # TODO
+            logger.info(
+                f"{MAGENTA}Judge requested rewrite/search. Routing back to 'search'.{RESET}"
+            )
             return "REWRITE"
         else:
             return END
@@ -203,10 +246,15 @@ class Agent:
         }
         # config = {"configurable": {"thread_id": "1"}}
         # messages = self.state_graph.invoke(initial_state, config=config)
-        messages = self.state_graph.invoke(initial_state)
-        print(f"After {messages['revision_number']} revisions...")
+        logger.info("Executing StateGraph...")
+        start_time = time.time()
+        final_state = self.state_graph.invoke(initial_state)
+        total_time = time.time() - start_time
+        final_answer = final_state["draft"]
+        logger.info(
+            f"Graph completed in {total_time:.2f}s across {final_state['revision_number']} iterations."
+        )
         breakpoint()
-        final_answer = messages["draft"]
         return final_answer
 
 
