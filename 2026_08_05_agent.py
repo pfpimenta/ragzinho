@@ -9,6 +9,18 @@
 4 - if the draft is not good enough, it goes back to step 1, otherwise it returns the draft
 """
 
+import warnings
+
+
+# Suppress all deprecation and user warnings globally
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+
+# Specific filters for LangChain deprecations
+warnings.filterwarnings("ignore", message=".*LangChainDeprecationWarning.*")
+warnings.filterwarnings("ignore", message=".*LangChainPendingDeprecationWarning.*")
+warnings.filterwarnings("ignore", message=".*allowed_objects.*")
+
 import time
 import os
 from dotenv import load_dotenv
@@ -21,11 +33,22 @@ from tavily import TavilyClient
 
 from langchain_deepseek import ChatDeepSeek
 from typing import TypedDict, List
-from langchain_core.pydantic_v1 import BaseModel
+
+# from langchain_core.pydantic_v1 import BaseModel # gives a warning
+from pydantic import BaseModel  # new version to avoid warning
 from langgraph.checkpoint.sqlite import SqliteSaver
+from llama_index.core import SimpleDirectoryReader, Document, VectorStoreIndex, Settings
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.llms.deepseek import DeepSeek
 
 # Load variables from .env file into os.environ
 load_dotenv()
+
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+DATA_FOLDER_PATH = os.path.join(PROJECT_ROOT, "data")
+ATTENTION_PAPER_PATH = os.path.join(DATA_FOLDER_PATH, "1706.03762v7.pdf")
+EPUB_PATH = os.path.join(DATA_FOLDER_PATH, "Meditations_of_a_Buddhist_skeptic.epub")
+CACHE_DIR = os.path.join(PROJECT_ROOT, ".cache", "huggingface")
 
 
 class AgentState(TypedDict):
@@ -41,7 +64,9 @@ class Queries(BaseModel):
 
 
 class Agent:
-    def __init__(self, max_revisions: int = 3):
+    def __init__(
+        self, max_revisions: int = 3, document_path: str = ATTENTION_PAPER_PATH
+    ):
         self.max_revisions = max_revisions
         self.model = ChatDeepSeek(
             model="deepseek-v4-flash",
@@ -49,6 +74,7 @@ class Agent:
         )
         self.tavily_client = TavilyClient(api_key=os.environ["TAVILY_API_KEY"])
         self.state_graph = self._build_agent_state_graph()
+        # self.query_engine = self._init_rag_engine(document_path)
 
     def _build_agent_state_graph(self) -> StateGraph[AgentState]:
         graph_builder = StateGraph(AgentState)
@@ -64,11 +90,29 @@ class Agent:
         )
         graph_builder.set_entry_point("search")
         # add memory checkpointer
-        memory = SqliteSaver.from_conn_string(":memory:")
+        # memory = SqliteSaver.from_conn_string(":memory:")
         # compile the state graph
         # agent_state_graph = graph_builder.compile(checkpointer=memory)
         agent_state_graph = graph_builder.compile()
         return agent_state_graph
+
+    def _init_rag_engine(self, document_path: str):
+        # TODO ... WIP
+        print("DEBUG: Setting up LlamaIndex...")
+        # Configure LlamaIndex settings
+        Settings.llm = DeepSeek(model="deepseek-v4-flash")
+        print("DEBUG: Setting up HuggingFaceEmbedding model...")
+        Settings.embed_model = HuggingFaceEmbedding(
+            model_name="BAAI/bge-small-en-v1.5", cache_folder=CACHE_DIR
+        )
+        # Load EPUB document & create RAG index
+        print("DEBUG: Loading EPUB documents...")
+        documents = SimpleDirectoryReader(input_files=[EPUB_PATH]).load_data()
+        print(f"Loaded {len(documents)} documents.")
+        # Create a vector store index from the documents
+        index = VectorStoreIndex.from_documents(documents)
+        print(f"created VectorStoreIndex: {index}")
+        return index.as_query_engine()
 
     def _search_node(self, state: AgentState) -> dict:
         print("DEBUG search node, revision_number:", state["revision_number"])
@@ -168,7 +212,7 @@ class Agent:
 
 def main():
     print("========================================")
-    print("Welcome to the Smith, the Agent")
+    print("Welcome to Mr (Elliott) Smith, the Agent")
     print("========================================\n")
 
     agent = Agent()
