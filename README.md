@@ -26,7 +26,7 @@ python3 rag.py
 
 
 ## TODOs
+* better logging
 * rever se precisamos de todas as dependencias no requirements.txt (provavelmente nao precisamos das com openai no nome)
-* fazer rodar na GPU com CUDA
 * fazer funcionar com varios documentos
 * entender/melhorar o metodo de chunking/parsing de cada documento
