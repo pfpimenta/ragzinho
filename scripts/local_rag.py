@@ -1,3 +1,8 @@
+"""
+Local RAG pipeline implementation
+using LlamaIndex with Ollama (Llama 2) for local text generation 
+and BAAI/bge-small-en-v1.5 from Hugging Face for embeddings.
+"""
 from llama_index.core import SimpleDirectoryReader, Document, VectorStoreIndex
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.ollama import Ollama
